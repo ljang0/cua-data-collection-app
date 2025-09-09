@@ -1,0 +1,39 @@
+{
+  "name": "data-collector-app",
+  "version": "1.0.0",
+  "description": "Data collection app for LLM computer agent training",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build": "electron-builder"
+  },
+  "keywords": [
+    "electron",
+    "data-collection",
+    "llm-training"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4"
+  },
+  "dependencies": {
+    "fluent-ffmpeg": "^2.1.3",
+    "robotjs": "^0.6.0",
+    "screenshot-desktop": "^1.12.7",
+    "uiohook-napi": "^1.5.4"
+  },
+  "build": {
+    "appId": "com.datacollector.app",
+    "productName": "Data Collector",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "node_modules/**/*"
+    ]
+  }
+}

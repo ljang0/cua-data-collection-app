@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body { margin: 0; padding: 0; background: transparent; }
+    </style>
+</head>
+<body>
+    <script>
+        const { ipcRenderer } = require('electron');
+        
+        let mediaRecorders = [];
+        let recordedChunksMap = new Map();
+        
+        ipcRenderer.on('start-video-recording', async () => {
+            try {
+                console.log('Starting multi-screen video recording...');
+                
+                // Get screen sources from main process
+                const sources = await ipcRenderer.invoke('get-screen-sources');
+                
+                console.log(`Found ${sources.length} screen sources - will record all displays`);
+                
+                if (sources.length === 0) {
+                    throw new Error('No screen sources found - check screen recording permissions');
+                }
+                
+                // Get overlay bounds to potentially exclude from recording
+                const overlayBounds = await ipcRenderer.invoke('get-overlay-bounds');
+                console.log('Overlay bounds:', overlayBounds);
+                
+                // Record each screen source
+                for (let i = 0; i < sources.length; i++) {
+                    const source = sources[i];
+                    console.log(`Setting up recording for screen ${i + 1}: ${source.name} (${source.id})`);
+                    
+                    try {
+                        await setupScreenRecording(source, i);
+                    } catch (error) {
+                        console.error(`Failed to setup recording for screen ${source.id}:`, error);
+                        // Continue with other screens even if one fails
+                    }
+                }
+                
+                console.log(`✓ Multi-screen recording started for ${mediaRecorders.length} displays`);
+                ipcRenderer.send('video-recording-started');
+                
+            } catch (error) {
+                console.error('Failed to start multi-screen video recording:', error);
+                ipcRenderer.send('video-recording-error', error.message);
+            }
+        });
+        
+        async function setupScreenRecording(source, screenIndex) {
+            const recordedChunks = [];
+            recordedChunksMap.set(source.id, recordedChunks);
+            
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: false,
+                video: {
+                    mandatory: {
+                        chromeMediaSource: 'desktop',
+                        chromeMediaSourceId: source.id,
+                        minWidth: 1280,
+                        maxWidth: 7680,  // 8K support
+                        minHeight: 720,
+                        maxHeight: 4320, // 8K support  
+                        maxFrameRate: 60 // Higher frame rate
+                    },
+                    ideal: {
+                        frameRate: 60,
+                        width: 3840,    // Prefer 4K when available
+                        height: 2160,
+                        aspectRatio: 16/9
+                    }
+                }
+            });
+            
+            // Log actual stream resolution
+            const videoTrack = stream.getVideoTracks()[0];
+            const settings = videoTrack.getSettings();
+            console.log(`Screen ${screenIndex + 1} stream: ${settings.width}x${settings.height} @ ${settings.frameRate}fps`);
+            
+            // Prioritize high-quality MP4 codecs
+            let mimeType;
+            let videoBitsPerSecond;
+            
+            // Try H.264 MP4 with ultra-high bitrate (best quality)
+            if (MediaRecorder.isTypeSupported('video/mp4;codecs=h264')) {
+                mimeType = 'video/mp4;codecs=h264';
+                videoBitsPerSecond = 100000000; // 100 Mbps for ultra quality
+            } 
+            // Try AV1 MP4 (excellent compression)
+            else if (MediaRecorder.isTypeSupported('video/mp4;codecs=av01')) {
+                mimeType = 'video/mp4;codecs=av01';
+                videoBitsPerSecond = 80000000; // 80 Mbps
+            }
+            // Try VP9 WebM (high quality, good compression)
+            else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+                mimeType = 'video/webm;codecs=vp9';
+                videoBitsPerSecond = 70000000; // 70 Mbps
+            }
+            // Fall back to VP8 WebM
+            else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
+                mimeType = 'video/webm;codecs=vp8';
+                videoBitsPerSecond = 60000000; // 60 Mbps
+            }
+            // Generic fallbacks
+            else if (MediaRecorder.isTypeSupported('video/mp4')) {
+                mimeType = 'video/mp4';
+                videoBitsPerSecond = 50000000; // 50 Mbps
+            } else {
+                mimeType = 'video/webm';
+                videoBitsPerSecond = 40000000; // 40 Mbps
+            }
+            
+            console.log(`Screen ${screenIndex + 1} using: ${mimeType} with ${videoBitsPerSecond/1000000}Mbps bitrate`);
+            
+            const mediaRecorder = new MediaRecorder(stream, { 
+                mimeType: mimeType,
+                videoBitsPerSecond: videoBitsPerSecond,
+                bitsPerSecond: videoBitsPerSecond * 1.1 // Slightly higher overall bitrate
+            });
+            
+            mediaRecorder.ondataavailable = (event) => {
+                console.log(`Screen ${screenIndex + 1} data chunk: ${event.data.size} bytes`);
+                if (event.data.size > 0) {
+                    recordedChunks.push(event.data);
+                }
+            };
+            
+            mediaRecorder.onstop = async () => {
+                console.log(`Screen ${screenIndex + 1} recording stopped, ${recordedChunks.length} chunks collected`);
+                if (recordedChunks.length > 0) {
+                    const blob = new Blob(recordedChunks, { type: mimeType });
+                    const buffer = await blob.arrayBuffer();
+                    console.log(`Sending screen ${screenIndex + 1} video data: ${buffer.byteLength} bytes (${mimeType})`);
+                    ipcRenderer.send('video-data', buffer, mimeType, source.id, screenIndex);
+                }
+            };
+            
+            mediaRecorder.onerror = (event) => {
+                console.error(`MediaRecorder error for screen ${screenIndex + 1}:`, event);
+                ipcRenderer.send('video-recording-error', event.error?.message || `Screen ${screenIndex + 1} recording error`);
+            };
+            
+            mediaRecorder.start(500); // Record in 0.5-second chunks for smoother quality
+            console.log(`MediaRecorder started for screen ${screenIndex + 1}`);
+            
+            // Store the recorder for later cleanup
+            mediaRecorders.push({
+                recorder: mediaRecorder,
+                stream: stream,
+                sourceId: source.id,
+                screenIndex: screenIndex
+            });
+        }
+        
+        ipcRenderer.on('stop-video-recording', () => {
+            console.log('Received stop-video-recording signal');
+            try {
+                console.log(`Stopping ${mediaRecorders.length} screen recorders...`);
+                
+                mediaRecorders.forEach((recorderInfo, index) => {
+                    try {
+                        if (recorderInfo.recorder && recorderInfo.recorder.state === 'recording') {
+                            console.log(`Stopping recorder ${index + 1} (screen ${recorderInfo.screenIndex + 1})...`);
+                            
+                            // Set up a timeout in case MediaRecorder.stop() hangs
+                            const stopTimeout = setTimeout(() => {
+                                console.warn(`Recorder ${index + 1} stop timeout - forcing track cleanup`);
+                                if (recorderInfo.stream) {
+                                    recorderInfo.stream.getTracks().forEach(track => {
+                                        try {
+                                            track.stop();
+                                        } catch (e) {
+                                            console.error(`Error stopping track for recorder ${index + 1}:`, e);
+                                        }
+                                    });
+                                }
+                            }, 2000);
+                            
+                            recorderInfo.recorder.stop();
+                            clearTimeout(stopTimeout);
+                            console.log(`Recorder ${index + 1} stopped successfully`);
+                        } else {
+                            console.log(`Recorder ${index + 1} not in recording state:`, recorderInfo.recorder?.state || 'undefined');
+                        }
+                        
+                        // Stop all tracks to free up resources
+                        if (recorderInfo.stream) {
+                            recorderInfo.stream.getTracks().forEach(track => {
+                                try {
+                                    track.stop();
+                                    console.log(`Track stopped for screen ${recorderInfo.screenIndex + 1}`);
+                                } catch (e) {
+                                    console.error(`Error stopping track for screen ${recorderInfo.screenIndex + 1}:`, e);
+                                }
+                            });
+                        }
+                    } catch (error) {
+                        console.error(`Error stopping recorder ${index + 1}:`, error);
+                    }
+                });
+                
+                // Clear the recorders array
+                mediaRecorders = [];
+                recordedChunksMap.clear();
+                console.log('All recorders stopped and cleaned up');
+                
+            } catch (error) {
+                console.error('Error in stop-video-recording:', error);
+            }
+        });
+    </script>
+</body>
+</html>
