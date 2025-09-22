@@ -46,26 +46,41 @@ const keycodeMap = {
   16: 'Q', 17: 'W', 18: 'E', 19: 'R', 20: 'T', 21: 'Y', 22: 'U', 23: 'I', 24: 'O', 25: 'P',
   30: 'A', 31: 'S', 32: 'D', 33: 'F', 34: 'G', 35: 'H', 36: 'J', 37: 'K', 38: 'L',
   44: 'Z', 45: 'X', 46: 'C', 47: 'V', 48: 'B', 49: 'N', 50: 'M',
-  
+
   // Numbers
   11: '0', 2: '1', 3: '2', 4: '3', 5: '4', 6: '5', 7: '6', 8: '7', 9: '8', 10: '9',
-  
+
   // Function keys
   59: 'F1', 60: 'F2', 61: 'F3', 62: 'F4', 63: 'F5', 64: 'F6',
   65: 'F7', 66: 'F8', 67: 'F9', 68: 'F10', 87: 'F11', 88: 'F12',
-  
+
   // Modifiers
   42: 'LEFT_SHIFT', 54: 'RIGHT_SHIFT',
   29: 'LEFT_CTRL', 3613: 'RIGHT_CTRL',
   56: 'LEFT_ALT', 3640: 'RIGHT_ALT',
-  
+  3675: 'LEFT_CMD', 3676: 'RIGHT_CMD',
+
   // Special keys
   1: 'ESCAPE', 28: 'ENTER', 57: 'SPACE', 14: 'BACKSPACE', 15: 'TAB',
   12: '-', 13: '=', 26: '[', 27: ']', 43: '\\', 39: ';', 40: "'", 41: '`',
-  51: ',', 52: '.', 53: '/', 
-  
+  51: ',', 52: '.', 53: '/',
+
   // Arrow keys
-  72: 'UP', 80: 'DOWN', 75: 'LEFT', 77: 'RIGHT'
+  72: 'UP', 80: 'DOWN', 75: 'LEFT', 77: 'RIGHT',
+
+  // Additional navigation keys
+  71: 'HOME', 79: 'END', 73: 'PAGE_UP', 81: 'PAGE_DOWN',
+  82: 'INSERT', 83: 'DELETE',
+
+  // Numpad keys
+  82: 'NUMPAD_0', 79: 'NUMPAD_1', 80: 'NUMPAD_2', 81: 'NUMPAD_3',
+  75: 'NUMPAD_4', 76: 'NUMPAD_5', 77: 'NUMPAD_6',
+  71: 'NUMPAD_7', 72: 'NUMPAD_8', 73: 'NUMPAD_9',
+  83: 'NUMPAD_DOT', 78: 'NUMPAD_PLUS', 74: 'NUMPAD_MINUS',
+  55: 'NUMPAD_MULTIPLY', 98: 'NUMPAD_DIVIDE', 28: 'NUMPAD_ENTER',
+
+  // Lock keys
+  58: 'CAPS_LOCK', 69: 'NUM_LOCK', 70: 'SCROLL_LOCK'
 };
 
 function getKeyName(keycode) {
@@ -1695,22 +1710,30 @@ function startEventListeners() {
     // More inclusive key detection for recording
     const key = UiohookKey[e.keycode] || `Key${e.keycode}`;
     const importantKeys = ['Enter', 'Tab', 'Backspace', 'Delete', 'Space', 'Escape', 'Shift', 'Ctrl', 'Alt', 'Cmd'];
-    
+
     // Accept all printable characters (letters, numbers, symbols) and important keys using correct uIOhook keycodes
     const isLetter = [16, 17, 18, 19, 20, 21, 22, 23, 24, 25,  // QWERTYUIOP
-                      30, 31, 32, 33, 34, 35, 36, 37, 38,       // ASDFGHJKL  
+                      30, 31, 32, 33, 34, 35, 36, 37, 38,       // ASDFGHJKL
                       44, 45, 46, 47, 48, 49, 50].includes(e.keycode); // ZXCVBNM
     const isNumber = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11].includes(e.keycode); // 1234567890
     const isSpecialChar = [57, 12, 13, 26, 27, 43, 39, 40, 41, 51, 52, 53].includes(e.keycode); // space, -, =, [, ], \, ;, ', `, ,, ., /
-    const isImportantKey = [28, 15, 14, 1].includes(e.keycode); // Enter, Tab, Backspace, Escape
+    const isImportantKey = [28, 15, 14, 1, 83].includes(e.keycode); // Enter, Tab, Backspace, Escape, Delete
+    const isArrowKey = [72, 80, 75, 77].includes(e.keycode); // UP, DOWN, LEFT, RIGHT arrow keys
+    const isFunctionKey = [59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 87, 88].includes(e.keycode); // F1-F12
+    const isNavigationKey = [71, 79, 73, 81, 82].includes(e.keycode); // HOME, END, PAGE_UP, PAGE_DOWN, INSERT
+    const isLockKey = [58, 69, 70].includes(e.keycode); // CAPS_LOCK, NUM_LOCK, SCROLL_LOCK
     const isImportant = importantKeys.some(k => key.includes(k));
-    
-    const shouldCapture = isLetter || isNumber || isSpecialChar || isImportantKey || isImportant;
-    
+
+    const shouldCapture = isLetter || isNumber || isSpecialChar || isImportantKey || isArrowKey || isFunctionKey || isNavigationKey || isLockKey || isImportant;
+
     // Don't capture the shortcut keys themselves
     const isShortcutKey = e.keycode === 67 || e.keycode === 1 || (ctrlPressed && shiftPressed && e.keycode === 19); // F9, Escape, Ctrl+Shift+R
-    
-    if (shouldCapture && !isShortcutKey) {
+
+    // Fallback: capture ANY key that's not a modifier key or shortcut, to ensure we don't miss anything
+    const isModifierOnly = [42, 54, 29, 3613, 56, 3640, 3675, 3676].includes(e.keycode); // All modifier keys
+    const shouldCaptureFallback = !isModifierOnly && !isShortcutKey;
+
+    if ((shouldCapture || shouldCaptureFallback) && !isShortcutKey) {
       // Check for key combination
       const combination = getKeyCombination(e.keycode, keyName);
       
