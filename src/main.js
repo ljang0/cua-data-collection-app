@@ -225,21 +225,20 @@ function checkFFmpegAvailability() {
 async function convertToMP4(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
     console.log(`Converting ${inputPath} to ${outputPath}...`);
-    
+
     ffmpeg(inputPath)
       .videoCodec('libx264')          // H.264 codec
-      .audioCodec('aac')              // AAC audio codec
-      .videoBitrate('100000k')        // 100 Mbps for maximum quality
-      .audioBitrate('320k')           // High-quality audio
+      .audioCodec('flac')             // Lossless audio codec
       .addOption('-preset', 'veryslow') // Slowest encoding for best compression/quality
-      .addOption('-profile:v', 'high') // H.264 High Profile for better quality
+      .addOption('-profile:v', 'high444') // H.264 High 4:4:4 Profile for lossless
       .addOption('-level', '5.2')     // Support up to 8K at higher bitrates
-      .addOption('-pix_fmt', 'yuv420p') // Compatible pixel format
-      .addOption('-crf', '12')        // Constant Rate Factor (12 = near-lossless, even better than 15)
-      .addOption('-x264-params', 'keyint=60:min-keyint=15:ref=16:bframes=16:me=umh:subme=11:trellis=2:aq-mode=3:aq-strength=0.8') // Ultra-high quality settings
+      .addOption('-pix_fmt', 'yuv444p') // Full chroma resolution for lossless
+      .addOption('-crf', '0')         // Constant Rate Factor 0 = LOSSLESS
+      .addOption('-qp', '0')          // Additional lossless parameter
+      .addOption('-x264-params', 'keyint=60:min-keyint=15:ref=16:bframes=16:me=umh:subme=11:trellis=2:aq-mode=3:aq-strength=0.8:psy-rd=1.0:psy-trellis=0.2') // Ultra-high quality settings
       .addOption('-tune', 'stillimage') // Optimize for screen recording content
-      .fps(60)                        // 60 fps
-      // Don't force resolution - preserve original quality
+      .addOption('-movflags', '+faststart') // Better MP4 structure
+      // Preserve original frame rate and resolution - don't force anything
       .format('mp4')                  // MP4 format
       .output(outputPath)
       .on('start', (commandLine) => {
@@ -260,6 +259,287 @@ async function convertToMP4(inputPath, outputPath) {
       })
       .run();
   });
+}
+
+// Direct FFmpeg recording for lossless MP4
+let ffmpegProcesses = [];
+
+// Native macOS screen recording
+let nativeScreenRecordingProcesses = [];
+
+async function startDirectFFmpegRecording() {
+  try {
+    console.log('Starting direct FFmpeg screen recording (lossless MP4)...');
+
+    const displays = screen.getAllDisplays();
+    console.log(`Found ${displays.length} displays for direct FFmpeg recording`);
+
+    const { spawn } = require('child_process');
+    ffmpegProcesses = [];
+
+    for (let i = 0; i < displays.length; i++) {
+      const display = displays[i];
+      console.log(`Setting up direct FFmpeg recording for display ${display.id}: ${display.bounds.width}x${display.bounds.height}`);
+
+      // Create lossless MP4 output path
+      const outputPath = `data/${currentTaskName}/videos/ffmpeg_recording_display_${display.id}.mp4`;
+
+      // FFmpeg command for direct screen capture to lossless MP4
+      const ffmpegArgs = [
+        '-y', // Overwrite output file
+        '-f', 'avfoundation', // Use AVFoundation for macOS screen capture
+        '-capture_cursor', '1', // Capture cursor
+        '-capture_clicks', '1', // Capture click animations
+        '-r', '60', // 60 FPS for smooth playback
+        '-i', `${i}:none`, // Screen index with no audio
+        '-c:v', 'libx264', // H.264 video codec
+        '-preset', 'ultrafast', // Fast encoding for real-time
+        '-crf', '0', // Lossless quality (CRF 0)
+        '-pix_fmt', 'yuv444p', // Full chroma resolution
+        '-tune', 'stillimage', // Optimize for screen content
+        '-movflags', '+faststart', // Better MP4 structure
+        '-avoid_negative_ts', 'make_zero', // Handle timestamps
+        outputPath
+      ];
+
+      console.log(`FFmpeg command for display ${display.id}:`, 'ffmpeg', ffmpegArgs.join(' '));
+
+      // Start FFmpeg process
+      const ffmpegProcess = spawn('ffmpeg', ffmpegArgs, {
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      // Ensure stdin is writable for graceful shutdown
+      ffmpegProcess.stdin.setDefaultEncoding('utf8');
+
+      ffmpegProcess.stdout.on('data', (data) => {
+        console.log(`FFmpeg display ${display.id} stdout:`, data.toString());
+      });
+
+      ffmpegProcess.stderr.on('data', (data) => {
+        const output = data.toString();
+        if (output.includes('frame=')) {
+          // Parse frame info for progress
+          const frameMatch = output.match(/frame=\s*(\d+)/);
+          if (frameMatch) {
+            const frameCount = parseInt(frameMatch[1]);
+            if (frameCount % 300 === 0) { // Log every 5 seconds at 60fps
+              console.log(`Display ${display.id} recording: ${frameCount} frames captured`);
+            }
+          }
+        } else if (!output.includes('deprecated')) {
+          console.log(`FFmpeg display ${display.id} stderr:`, output);
+        }
+      });
+
+      ffmpegProcess.on('error', (error) => {
+        console.error(`FFmpeg process error for display ${display.id}:`, error);
+      });
+
+      ffmpegProcess.on('exit', (code, signal) => {
+        console.log(`FFmpeg process for display ${display.id} exited with code ${code}, signal ${signal}`);
+      });
+
+      ffmpegProcesses.push({
+        process: ffmpegProcess,
+        displayId: display.id,
+        outputPath: outputPath,
+        displayIndex: i
+      });
+
+      console.log(`✓ Direct FFmpeg recording started for display ${display.id}`);
+    }
+
+    console.log(`✅ Direct FFmpeg recording started for all ${displays.length} displays`);
+
+  } catch (error) {
+    console.error('Direct FFmpeg recording failed:', error);
+    throw error;
+  }
+}
+
+async function stopDirectFFmpegRecording() {
+  try {
+    console.log(`Stopping ${ffmpegProcesses.length} direct FFmpeg processes...`);
+
+    const stopPromises = ffmpegProcesses.map(async (ffmpegInfo) => {
+      return new Promise((resolve) => {
+        const { process: ffmpegProcess, displayId, outputPath } = ffmpegInfo;
+
+        console.log(`Sending 'q' command to FFmpeg process for display ${displayId}...`);
+
+        // Set up timeout to force kill if needed
+        const forceKillTimeout = setTimeout(() => {
+          console.warn(`FFmpeg process for display ${displayId} taking too long, sending SIGTERM...`);
+          ffmpegProcess.kill('SIGTERM');
+
+          // Final timeout for SIGKILL
+          setTimeout(() => {
+            if (!ffmpegProcess.killed) {
+              console.warn(`Force killing FFmpeg process for display ${displayId}`);
+              ffmpegProcess.kill('SIGKILL');
+            }
+          }, 3000);
+        }, 10000); // 10 second timeout for graceful shutdown
+
+        ffmpegProcess.on('exit', (code, signal) => {
+          clearTimeout(forceKillTimeout);
+          console.log(`✓ FFmpeg process for display ${displayId} exited (code: ${code}, signal: ${signal}), video saved: ${outputPath}`);
+          resolve();
+        });
+
+        ffmpegProcess.on('error', (error) => {
+          clearTimeout(forceKillTimeout);
+          console.error(`FFmpeg process error for display ${displayId}:`, error);
+          resolve(); // Still resolve to not hang the promise
+        });
+
+        // Send 'q' command to FFmpeg stdin for graceful shutdown
+        try {
+          ffmpegProcess.stdin.write('q\n');
+          ffmpegProcess.stdin.end();
+        } catch (error) {
+          console.warn(`Could not send 'q' command to FFmpeg for display ${displayId}, sending SIGINT instead`);
+          ffmpegProcess.kill('SIGINT');
+        }
+      });
+    });
+
+    // Wait for all processes to stop
+    await Promise.all(stopPromises);
+
+    // Clear the processes array
+    ffmpegProcesses = [];
+
+    console.log('✅ All direct FFmpeg recordings stopped successfully');
+
+  } catch (error) {
+    console.error('Error stopping direct FFmpeg recordings:', error);
+  }
+}
+
+// Native macOS screen recording using screencapture
+async function startNativeScreenRecording() {
+  try {
+    console.log('Starting native macOS screen recording...');
+
+    const displays = screen.getAllDisplays();
+    console.log(`Found ${displays.length} displays for native recording`);
+
+    const { spawn } = require('child_process');
+    nativeScreenRecordingProcesses = [];
+
+    for (let i = 0; i < displays.length; i++) {
+      const display = displays[i];
+      console.log(`Setting up native recording for display ${display.id}: ${display.bounds.width}x${display.bounds.height}`);
+
+      // Create output path
+      const outputPath = `data/${currentTaskName}/videos/native_recording_display_${display.id}.mov`;
+
+      // screencapture command for video recording
+      const screencaptureArgs = [
+        '-D', display.id.toString(), // Specific display
+        '-v', // Video recording mode
+        '-k', // Show clicks in video recording mode
+        '-C', // Capture the cursor as well as the screen
+        '-x', // Do not play sounds (quiet)
+        outputPath
+      ];
+
+      console.log(`Native recording command for display ${display.id}:`, 'screencapture', screencaptureArgs.join(' '));
+
+      // Start screencapture process
+      const recordingProcess = spawn('screencapture', screencaptureArgs, {
+        stdio: ['pipe', 'pipe', 'pipe']
+      });
+
+      recordingProcess.stdout.on('data', (data) => {
+        console.log(`Native recording display ${display.id} stdout:`, data.toString());
+      });
+
+      recordingProcess.stderr.on('data', (data) => {
+        const output = data.toString();
+        console.log(`Native recording display ${display.id} stderr:`, output);
+      });
+
+      recordingProcess.on('error', (error) => {
+        console.error(`Native recording process error for display ${display.id}:`, error);
+      });
+
+      recordingProcess.on('exit', (code, signal) => {
+        console.log(`Native recording process for display ${display.id} exited with code ${code}, signal ${signal}`);
+      });
+
+      nativeScreenRecordingProcesses.push({
+        process: recordingProcess,
+        displayId: display.id,
+        outputPath: outputPath,
+        displayIndex: i
+      });
+
+      console.log(`✓ Native recording started for display ${display.id}`);
+    }
+
+    console.log(`✅ Native recording started for all ${displays.length} displays`);
+
+  } catch (error) {
+    console.error('Native screen recording failed:', error);
+    throw error;
+  }
+}
+
+async function stopNativeScreenRecording() {
+  try {
+    console.log(`Stopping ${nativeScreenRecordingProcesses.length} native recording processes...`);
+
+    const stopPromises = nativeScreenRecordingProcesses.map(async (recordingInfo) => {
+      return new Promise((resolve) => {
+        const { process: recordingProcess, displayId, outputPath } = recordingInfo;
+
+        console.log(`Sending SIGINT to native recording process for display ${displayId}...`);
+
+        // Set up timeout to force kill if needed
+        const forceKillTimeout = setTimeout(() => {
+          console.warn(`Native recording process for display ${displayId} taking too long, sending SIGTERM...`);
+          recordingProcess.kill('SIGTERM');
+
+          // Final timeout for SIGKILL
+          setTimeout(() => {
+            if (!recordingProcess.killed) {
+              console.warn(`Force killing native recording process for display ${displayId}`);
+              recordingProcess.kill('SIGKILL');
+            }
+          }, 3000);
+        }, 5000); // 5 second timeout
+
+        recordingProcess.on('exit', (code, signal) => {
+          clearTimeout(forceKillTimeout);
+          console.log(`✓ Native recording process for display ${displayId} exited (code: ${code}, signal: ${signal}), video saved: ${outputPath}`);
+          resolve();
+        });
+
+        recordingProcess.on('error', (error) => {
+          clearTimeout(forceKillTimeout);
+          console.error(`Native recording process error for display ${displayId}:`, error);
+          resolve(); // Still resolve to not hang the promise
+        });
+
+        // Send graceful termination signal
+        recordingProcess.kill('SIGINT');
+      });
+    });
+
+    // Wait for all processes to stop
+    await Promise.all(stopPromises);
+
+    // Clear the processes array
+    nativeScreenRecordingProcesses = [];
+
+    console.log('✅ All native recordings stopped successfully');
+
+  } catch (error) {
+    console.error('Error stopping native recordings:', error);
+  }
 }
 
 // Helper function to get video-relative timestamp in seconds
@@ -1600,12 +1880,27 @@ async function stopRecording() {
 
 async function startVideoRecording() {
   try {
-    if (videoRecorderWindow && !videoRecorderWindow.isDestroyed()) {
-      console.log('Sending start-video-recording to video recorder window');
-      videoRecorderWindow.webContents.send('start-video-recording');
+    if (process.platform === 'darwin') {
+      // Priority 1: Native macOS screen recording (simplest, most reliable)
+      console.log('Starting native macOS screen recording...');
+      await startNativeScreenRecording();
     } else {
-      console.error('Video recorder window not available');
-      throw new Error('Video recorder window not available');
+      // For non-macOS platforms, try FFmpeg first, then WebRTC
+      const ffmpegAvailable = await checkFFmpegAvailability();
+
+      if (ffmpegAvailable) {
+        console.log('Starting direct FFmpeg screen recording (lossless)...');
+        await startDirectFFmpegRecording();
+      } else {
+        console.log('Falling back to WebRTC recording...');
+        if (videoRecorderWindow && !videoRecorderWindow.isDestroyed()) {
+          console.log('Sending start-video-recording to video recorder window');
+          videoRecorderWindow.webContents.send('start-video-recording');
+        } else {
+          console.error('Video recorder window not available');
+          throw new Error('Video recorder window not available');
+        }
+      }
     }
   } catch (error) {
     console.error('Failed to start video recording:', error);
@@ -1616,25 +1911,48 @@ async function startVideoRecording() {
 function stopVideoRecording() {
   // Make this function synchronous and non-blocking
   try {
-    if (videoRecorderWindow && !videoRecorderWindow.isDestroyed()) {
+    // Check if we're using native macOS recording
+    if (nativeScreenRecordingProcesses && nativeScreenRecordingProcesses.length > 0) {
+      console.log('Stopping native macOS recording...');
+      // Stop native processes in background (non-blocking)
+      setImmediate(async () => {
+        try {
+          await stopNativeScreenRecording();
+        } catch (error) {
+          console.error('Error stopping native recording:', error);
+        }
+      });
+    }
+    // Check if we're using direct FFmpeg recording
+    else if (ffmpegProcesses && ffmpegProcesses.length > 0) {
+      console.log('Stopping direct FFmpeg recording...');
+      // Stop FFmpeg processes in background (non-blocking)
+      setImmediate(async () => {
+        try {
+          await stopDirectFFmpegRecording();
+        } catch (error) {
+          console.error('Error stopping direct FFmpeg recording:', error);
+        }
+      });
+    } else if (videoRecorderWindow && !videoRecorderWindow.isDestroyed()) {
       console.log('Sending stop-video-recording to video recorder window');
       videoRecorderWindow.webContents.send('stop-video-recording');
-      
+
       // Don't wait - let video processing happen in background
       console.log('Video stop signal sent, continuing immediately...');
-      
+
       // Set a background timeout to check if video was saved
       setTimeout(() => {
         console.log('Background video processing check complete');
       }, 1000);
-      
+
     } else {
       console.error('Video recorder window not available for stopping');
     }
   } catch (error) {
     console.error('Failed to stop video recording:', error);
   }
-  
+
   console.log('Video recording stop completed (non-blocking)');
 }
 
@@ -2159,10 +2477,10 @@ ipcMain.on('video-data', async (event, buffer, mimeType, sourceId, screenIndex) 
       const ffmpegAvailable = await checkFFmpegAvailability();
       
       if (ffmpegAvailable) {
-        console.log(`Converting screen ${screenIndex + 1} WebM to MP4...`);
+        console.log(`Converting screen ${screenIndex + 1} WebM to LOSSLESS MP4 (CRF 0)...`);
         try {
           await convertToMP4(originalVideoPath, mp4Path);
-          
+
           // Delete the original WebM file after successful conversion
           try {
             await fs.unlink(originalVideoPath);
@@ -2170,13 +2488,13 @@ ipcMain.on('video-data', async (event, buffer, mimeType, sourceId, screenIndex) 
           } catch (deleteError) {
             console.warn(`Could not delete screen ${screenIndex + 1} original WebM file:`, deleteError.message);
           }
-          
-          console.log(`✓ Screen ${screenIndex + 1} video conversion completed - final file:`, mp4Path);
+
+          console.log(`✓ Screen ${screenIndex + 1} LOSSLESS video conversion completed - final file:`, mp4Path);
         } catch (conversionError) {
-          console.error(`Screen ${screenIndex + 1} video conversion failed, keeping original WebM file:`, conversionError.message);
+          console.error(`Screen ${screenIndex + 1} lossless video conversion failed, keeping original WebM file:`, conversionError.message);
         }
       } else {
-        console.log(`✗ FFmpeg not available for screen ${screenIndex + 1} - keeping WebM file. Install FFmpeg to enable MP4 conversion.`);
+        console.log(`✗ FFmpeg not available for screen ${screenIndex + 1} - keeping WebM file. Install FFmpeg to enable lossless MP4 conversion.`);
       }
     }
     
@@ -2201,9 +2519,9 @@ app.whenReady().then(async () => {
   console.log('Checking FFmpeg availability...');
   const ffmpegAvailable = await checkFFmpegAvailability();
   if (ffmpegAvailable) {
-    console.log('✓ FFmpeg ready - WebM videos will be auto-converted to MP4');
+    console.log('✓ FFmpeg ready - WebM videos will be auto-converted to LOSSLESS MP4 (CRF 0)');
   } else {
-    console.log('ℹ FFmpeg not found - videos will be saved as WebM (install FFmpeg for MP4 conversion)');
+    console.log('ℹ FFmpeg not found - videos will be saved as WebM (install FFmpeg for lossless MP4 conversion)');
   }
   
   // Start global keyboard shortcuts immediately
@@ -2255,25 +2573,43 @@ ipcMain.handle('get-screen-sources', async () => {
       types: ['screen', 'window'],
       thumbnailSize: { width: 150, height: 150 }
     });
-    
+
     // Filter and categorize sources
     const screens = sources.filter(source => source.id.startsWith('screen:'));
     const windows = sources.filter(source => source.id.startsWith('window:'))
-                           .filter(source => 
+                           .filter(source =>
                              // Filter out system windows and empty names
-                             source.name.length > 0 && 
+                             source.name.length > 0 &&
                              !source.name.includes('Desktop') &&
                              !source.name.includes('Wallpaper') &&
                              !source.name.includes('Window Server')
                            );
-    
+
     console.log(`Found ${screens.length} screen displays and ${windows.length} application windows`);
-    
+
     // For now, return only screens to maintain existing behavior
     // TODO: In future, could add UI to let user choose screens vs windows
     return screens;
   } catch (error) {
     console.error('Failed to get screen sources:', error);
+    throw error;
+  }
+});
+
+// Handle getting display information for optimal video quality
+ipcMain.handle('get-display-info', () => {
+  try {
+    const displays = screen.getAllDisplays();
+    return displays.map(display => ({
+      id: display.id,
+      bounds: display.bounds,
+      workArea: display.workArea,
+      scaleFactor: display.scaleFactor,
+      size: display.size,
+      workAreaSize: display.workAreaSize
+    }));
+  } catch (error) {
+    console.error('Failed to get display info:', error);
     throw error;
   }
 });
