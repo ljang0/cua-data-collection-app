@@ -512,9 +512,10 @@ async function stopNativeScreenRecording() {
           }, 3000);
         }, 5000); // 5 second timeout
 
-        recordingProcess.on('exit', (code, signal) => {
+        recordingProcess.on('exit', async (code, signal) => {
           clearTimeout(forceKillTimeout);
           console.log(`✓ Native recording process for display ${displayId} exited (code: ${code}, signal: ${signal}), video saved: ${outputPath}`);
+          await handleRecordingExitAndExtract(outputPath, displayId);
           resolve();
         });
 
@@ -541,6 +542,140 @@ async function stopNativeScreenRecording() {
     console.error('Error stopping native recordings:', error);
   }
 }
+
+async function handleRecordingExitAndExtract(outputPath, displayId) {
+  try {
+    const sessionJsonPath = `data/${currentTaskName}/session_data.json`;
+
+    const frames = await extractPreActionFrames(outputPath, sessionJsonPath, {
+      displayId,
+      width: null,
+      outDir: `data/${currentTaskName}/videos/frames_display_${displayId}`,
+      alsoFinal: true,
+    });
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('preaction-frames-ready', {
+        displayId,
+        videoPath: outputPath,
+        frames,
+      });
+    }
+    console.log(`✓ Extracted ${frames.length} pre-action frames for display ${displayId}`);
+  } catch (err) {
+    console.error(`Pre-action frame extraction failed for display ${displayId}:`, err);
+  }
+}
+
+async function getVideoResolution(inputPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(inputPath, (err, data) => {
+      if (err) return reject(err);
+      const stream = data.streams.find(s => s.codec_type === 'video');
+      resolve({
+        width: stream.width,
+        height: stream.height,
+      });
+    });
+  });
+}
+
+// Accurate single-frame grab at a timestamp.
+// Note: put -ss AFTER -i for frame-accurate seeks.
+async function grabFrameAt(inputPath, outPath, seconds, width = null) {
+  await fs.mkdir(path.dirname(outPath), { recursive: true });
+
+  return new Promise((resolve, reject) => {
+    let cmd = ffmpeg(inputPath)
+      .outputOptions(['-frames:v', '1', '-q:v', '1', '-pix_fmt', 'rgb24']);
+
+    if (width) {
+      cmd = cmd.videoFilters(`scale=${width}:-1:flags=lanczos`);
+    }
+
+    cmd
+      .on('end', resolve)
+      .on('error', reject)
+      .seekInput(seconds)
+      .output(outPath)
+      .run();
+  });
+}
+
+// Probe duration with ffprobe (seconds as number).
+async function getVideoDurationSec(inputPath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(inputPath, (err, data) => {
+      if (err) return reject(err);
+      const stream = data.streams.find(s => s.codec_type === 'video');
+      resolve(stream?.duration ? parseFloat(stream.duration) : parseFloat(data.format.duration || '0'));
+    });
+  });
+}
+
+async function extractPreActionFrames(videoPath, sessionJsonPath, {
+  displayId = 1,
+  width = null,           // null => auto-probe native width
+  outDir = null,
+  includeFinal = true,    // also capture midpoint between last event and end
+} = {}) {
+  const raw = await fs.readFile(sessionJsonPath, 'utf8');
+  const session = JSON.parse(raw);
+
+  // Sort events by time
+  const events = (session?.events || [])
+    .filter(e => typeof e.timestamp === 'number')
+    .sort((a, b) => a.timestamp - b.timestamp);
+
+  const duration = await getVideoDurationSec(videoPath);
+
+  // use video duration as session length fallback
+  const sessionLen = duration;
+
+  if (!outDir) {
+    outDir = path.join(path.dirname(videoPath), `frames_display_${displayId}`);
+  }
+  await fs.mkdir(outDir, { recursive: true });
+
+  // decide output width
+  const { width: nativeWidth } = await getVideoResolution(videoPath);
+  const targetWidth = width ?? (nativeWidth || null);
+
+  const results = [];
+  const eps = 1e-3;
+
+  let outPath = path.join(outDir, 'initial_screen.png')
+  let nextT = (1 < events.length) ? events[1].timestamp : sessionLen;
+  let t = (0.00 + nextT) / 2 
+  await grabFrameAt(videoPath, outPath, t, targetWidth);
+  results.push({t, outPath });
+
+  for (let i = 0; i < events.length; i++) {
+    const cur = events[i];
+    nextT = (i < events.length - 1) ? events[i + 1].timestamp : sessionLen;
+
+    // midpoint between current and next (or end of session for last)
+    let t = (cur.timestamp + nextT) / 2;
+    t = Math.min(Math.max(0, t), Math.max(0, duration - eps));
+
+    const id = cur.id ?? i;
+    outPath = path.join(outDir, `event_${String(id)}.png`);
+    await grabFrameAt(videoPath, outPath, t, targetWidth);
+    results.push({ id, t, outPath });
+  }
+
+  if (includeFinal && duration > 0 && events.length > 0) {
+    const lastT = events.at(-1).timestamp;
+    const tFinal = Math.min((lastT + sessionLen) / 2, duration - eps);
+    const finalPath = path.join(outDir, `final_mid.png`);
+    await grabFrameAt(videoPath, finalPath, tFinal, targetWidth);
+    results.push({ id: 'final', t: tFinal, outPath: finalPath });
+  }
+
+  return results;
+}
+
+
 
 // Helper function to get video-relative timestamp in seconds
 function getVideoTimestamp() {
