@@ -644,7 +644,7 @@ async function extractPreActionFrames(videoPath, sessionJsonPath, {
   const results = [];
   const eps = 1e-3;
 
-  let outPath = path.join(outDir, 'initial_screen.png')
+  let outPath = path.join(outDir, 'event_0.png')
   let nextT = (1 < events.length) ? events[1].timestamp : sessionLen;
   let t = (0.00 + nextT) / 2 
   await grabFrameAt(videoPath, outPath, t, targetWidth);
@@ -658,7 +658,7 @@ async function extractPreActionFrames(videoPath, sessionJsonPath, {
     let t = (cur.timestamp + nextT) / 2;
     t = Math.min(Math.max(0, t), Math.max(0, duration - eps));
 
-    const id = cur.id ?? i;
+    const id = cur.id ?? i + 1;
     outPath = path.join(outDir, `event_${String(id)}.png`);
     await grabFrameAt(videoPath, outPath, t, targetWidth);
     results.push({ id, t, outPath });
@@ -667,7 +667,7 @@ async function extractPreActionFrames(videoPath, sessionJsonPath, {
   if (includeFinal && duration > 0 && events.length > 0) {
     const lastT = events.at(-1).timestamp;
     const tFinal = Math.min((lastT + sessionLen) / 2, duration - eps);
-    const finalPath = path.join(outDir, `final_mid.png`);
+    const finalPath = path.join(outDir, `event_${String(events.length)}.png`);
     await grabFrameAt(videoPath, finalPath, tFinal, targetWidth);
     results.push({ id: 'final', t: tFinal, outPath: finalPath });
   }
