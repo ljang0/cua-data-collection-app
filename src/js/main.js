@@ -862,25 +862,12 @@ async function completeEvent(eventId, completeData = {}) {
   console.log(`Waiting for action to render for event ${eventId}...`);
   await new Promise(resolve => setTimeout(resolve, 800)); // 800ms delay for full rendering
   
-  // Take screenshot with the pre-assigned event ID
-  console.log(`Taking screenshot for event ${eventId}...`);
-  const screenshots = await captureScreenshot(eventId);
-  
   // Complete the event data
   const completeEvent = {
     ...eventSlot,
     ...completeData,
     _pending: false
   };
-  
-  // Add screenshots if captured
-  if (screenshots) {
-    completeEvent.screenshots = {
-      displays: screenshots.screenPaths,
-      appWindow: screenshots.appWindowPath
-    };
-    console.log(`✓ Added screenshot paths to event ${eventId}: ${screenshots.screenPaths.length} displays`);
-  }
   
   // Update the slot
   eventSlots.set(eventId, completeEvent);
@@ -1092,66 +1079,6 @@ async function getActiveApplicationWindow() {
     return null;
   }
 }
-
-
-// Capture browser window screenshot (includes tab and browser UI)
-async function captureApplicationWindowScreenshot(eventId = null) {
-  try {
-    const appWindow = await getActiveApplicationWindow();
-    
-    if (!appWindow) {
-      return null;
-    }
-    
-    console.log(`Capturing browser window: ${appWindow.name}`);
-    
-    const appWindowScreenshotPath = eventId 
-      ? `data/${currentTaskName}/screenshots/event_${eventId}_app_window.png`
-      : `data/${currentTaskName}/screenshots/browser_window_${Date.now()}.png`;
-    
-    if (process.platform === 'darwin') {
-      // On macOS, use screencapture with window ID
-      const { exec } = require('child_process');
-      return new Promise((resolve) => {
-        // Extract window ID from the source ID (format: "window:12345:0")
-        const windowId = appWindow.id.split(':')[1];
-        
-        exec(`/usr/sbin/screencapture -l ${windowId} -x "${appWindowScreenshotPath}"`, (error, stdout, stderr) => {
-          if (error) {
-            console.error(`Browser window capture failed:`, error.message);
-            resolve(null);
-          } else {
-            console.log(`✓ Browser window screenshot saved: ${appWindowScreenshotPath}`);
-            resolve({
-              path: appWindowScreenshotPath,
-              windowName: appWindow.name,
-              windowId: windowId,
-              timestamp: Date.now(),
-              type: 'browser_window'
-            });
-          }
-        });
-      });
-    } else {
-      // For other platforms, fall back to thumbnail
-      const thumbnailBuffer = appWindow.thumbnail.toPNG();
-      await fs.writeFile(appWindowScreenshotPath, thumbnailBuffer);
-      
-      console.log(`✓ Browser window screenshot saved (thumbnail): ${appWindowScreenshotPath}`);
-      return {
-        path: appWindowScreenshotPath,
-        windowName: appWindow.name,
-        timestamp: Date.now(),
-        type: 'browser_window_thumbnail'
-      };
-    }
-    
-  } catch (error) {
-    console.error('Failed to capture browser window screenshot:', error);
-    return null;
-  }
-}
-
 
 // Collect system metadata and screen information
 function getSystemMetadata() {
@@ -1506,335 +1433,6 @@ async function createVideoRecorderWindow() {
   console.log('Video recorder window created and loaded');
 }
 
-// Capture all displays simultaneously  
-async function captureAllScreens(eventId = null) {
-  try {
-    // Signal overlay to enter screenshot mode (become transparent)
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.webContents.send('enter-screenshot-mode');
-    }
-    
-    // Brief delay to ensure CSS transition completes
-    await new Promise(resolve => setTimeout(resolve, 150));
-    
-    const displays = screen.getAllDisplays();
-    const screenshotPromises = [];
-    const screenshotPaths = [];
-    
-    console.log(`Capturing ${displays.length} displays...`);
-    
-    // Capture each display
-    for (let i = 0; i < displays.length; i++) {
-      const display = displays[i];
-      const screenshotPath = eventId 
-        ? `data/${currentTaskName}/screenshots/event_${eventId}_display_${display.id}.png`
-        : `data/${currentTaskName}/screenshots/screenshot_${Date.now()}_display_${display.id}.png`;
-      screenshotPaths.push({
-        displayId: display.id,
-        path: screenshotPath,
-        bounds: display.bounds,
-        workArea: display.workArea,
-        scaleFactor: display.scaleFactor,
-        isPrimary: display.id === screen.getPrimaryDisplay().id
-      });
-      
-      // Try different approaches for each display
-      const capturePromise = (async () => {
-        try {
-          if (process.platform === 'darwin') {
-            // macOS: Use screencapture with display ID
-            const { exec } = require('child_process');
-            await new Promise((resolve, reject) => {
-              exec(`/usr/sbin/screencapture -D ${display.id} -x "${screenshotPath}"`, (error, stdout, stderr) => {
-                if (error) {
-                  console.error(`screencapture failed for display ${display.id}:`, error.message);
-                  reject(error);
-                } else {
-                  console.log(`Screenshot saved for display ${display.id}: ${screenshotPath}`);
-                  resolve();
-                }
-              });
-            });
-          } else {
-            // For other platforms, try screenshot-desktop with screen index
-            await screenshot({ 
-              filename: screenshotPath,
-              format: 'png',
-              screen: i
-            });
-            console.log(`Screenshot saved for display ${display.id}: ${screenshotPath}`);
-          }
-        } catch (displayError) {
-          console.error(`Failed to capture display ${display.id}:`, displayError.message);
-          // Continue with other displays even if one fails
-        }
-      })();
-      
-      screenshotPromises.push(capturePromise);
-    }
-    
-    // Wait for all screenshots to complete
-    await Promise.allSettled(screenshotPromises);
-    console.log(`✓ Multi-screen capture completed for ${displays.length} displays`);
-    
-    // Signal overlay to exit screenshot mode (become visible again)
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.webContents.send('exit-screenshot-mode');
-    }
-    
-    // Capture browser window screenshot  
-    const appWindowScreenshot = await captureApplicationWindowScreenshot(eventId);
-    
-    // Record screenshots in session data (screenshots don't need their own event ID)  
-    const screenshotRecord = {
-      timestamp: getVideoTimestamp(),
-      absoluteTimestamp: Date.now(),
-      type: 'multi-screen',
-      displayCount: displays.length,
-      displays: screenshotPaths
-    };
-    
-    // Add browser window screenshot info if captured
-    if (appWindowScreenshot) {
-      screenshotRecord.appWindow = appWindowScreenshot;
-    }
-    
-    sessionData.screenshots.push(screenshotRecord);
-    
-    const result = { 
-      screens: screenshotPaths, 
-      appWindow: appWindowScreenshot,
-      // Flatten paths for easy access
-      screenPaths: screenshotPaths.map(s => s.path),
-      appWindowPath: appWindowScreenshot?.path || null
-    };
-    
-    return result;
-  } catch (error) {
-    console.error('Multi-screen capture failed:', error);
-    // Make sure to restore overlay even if screenshot fails
-    if (overlayWindow && !overlayWindow.isDestroyed()) {
-      overlayWindow.webContents.send('exit-screenshot-mode');
-    }
-    return null;
-  }
-}
-
-// Use multi-screen capture for all screenshots
-async function captureScreenshot(eventId = null) {
-  return await captureAllScreens(eventId);
-}
-
-// Capture initial screenshot at recording start
-async function captureInitialScreenshot() {
-  try {
-    const displays = screen.getAllDisplays();
-    const screenshotPaths = [];
-    
-    console.log('Capturing initial state for all displays...');
-    
-    // Capture each display with distinct initial naming
-    for (let i = 0; i < displays.length; i++) {
-      const display = displays[i];
-      const screenshotPath = `data/${currentTaskName}/screenshots/initial_display_${display.id}.png`;
-      screenshotPaths.push({
-        displayId: display.id,
-        path: screenshotPath,
-        bounds: display.bounds,
-        workArea: display.workArea,
-        scaleFactor: display.scaleFactor,
-        isPrimary: display.id === screen.getPrimaryDisplay().id
-      });
-
-      // Use screencapture for macOS or fallback for other platforms
-      if (process.platform === 'darwin') {
-        const { exec } = require('child_process');
-        await new Promise((resolve, reject) => {
-          exec(`/usr/sbin/screencapture -D ${display.id} -x "${screenshotPath}"`, (error) => {
-            if (error) {
-              console.error(`Initial screencapture failed for display ${display.id}:`, error.message);
-              reject(error);
-            } else {
-              console.log(`✓ Initial screenshot saved for display ${display.id}: ${screenshotPath}`);
-              resolve();
-            }
-          });
-        });
-      } else {
-        // Fallback for other platforms
-        const displayShot = await screenshot({ screen: display.id });
-        await fs.writeFile(screenshotPath, displayShot);
-        console.log(`✓ Initial screenshot saved for display ${display.id}: ${screenshotPath}`);
-      }
-    }
-
-    // Capture initial app window screenshot
-    const appWindowScreenshot = await captureInitialAppWindowScreenshot();
-
-    return {
-      screens: screenshotPaths,
-      appWindow: appWindowScreenshot,
-      type: 'initial'
-    };
-  } catch (error) {
-    console.error('Initial screenshot capture failed:', error);
-    return null;
-  }
-}
-
-// Capture final screenshot at recording end
-async function captureFinalScreenshot() {
-  try {
-    const displays = screen.getAllDisplays();
-    const screenshotPaths = [];
-    
-    console.log('Capturing final state for all displays...');
-    
-    // Capture each display with distinct final naming
-    for (let i = 0; i < displays.length; i++) {
-      const display = displays[i];
-      const screenshotPath = `data/${currentTaskName}/screenshots/final_display_${display.id}.png`;
-      screenshotPaths.push({
-        displayId: display.id,
-        path: screenshotPath,
-        bounds: display.bounds,
-        workArea: display.workArea,
-        scaleFactor: display.scaleFactor,
-        isPrimary: display.id === screen.getPrimaryDisplay().id
-      });
-
-      // Use screencapture for macOS or fallback for other platforms
-      if (process.platform === 'darwin') {
-        const { exec } = require('child_process');
-        await new Promise((resolve, reject) => {
-          exec(`/usr/sbin/screencapture -D ${display.id} -x "${screenshotPath}"`, (error) => {
-            if (error) {
-              console.error(`Final screencapture failed for display ${display.id}:`, error.message);
-              reject(error);
-            } else {
-              console.log(`✓ Final screenshot saved for display ${display.id}: ${screenshotPath}`);
-              resolve();
-            }
-          });
-        });
-      } else {
-        // Fallback for other platforms
-        const displayShot = await screenshot({ screen: display.id });
-        await fs.writeFile(screenshotPath, displayShot);
-        console.log(`✓ Final screenshot saved for display ${display.id}: ${screenshotPath}`);
-      }
-    }
-
-    // Capture final app window screenshot
-    const appWindowScreenshot = await captureFinalAppWindowScreenshot();
-
-    return {
-      screens: screenshotPaths,
-      appWindow: appWindowScreenshot,
-      type: 'final'
-    };
-  } catch (error) {
-    console.error('Final screenshot capture failed:', error);
-    return null;
-  }
-}
-
-// Capture initial app window screenshot
-async function captureInitialAppWindowScreenshot() {
-  try {
-    const appWindow = await getActiveApplicationWindow();
-    if (!appWindow) return null;
-
-    console.log(`Capturing initial app window: ${appWindow.name}`);
-    const screenshotPath = `data/${currentTaskName}/screenshots/initial_app_window.png`;
-
-    if (process.platform === 'darwin') {
-      const { exec } = require('child_process');
-      const windowId = appWindow.id.split(':')[1];
-      
-      return new Promise((resolve) => {
-        exec(`/usr/sbin/screencapture -l ${windowId} -x "${screenshotPath}"`, (error) => {
-          if (error) {
-            console.error('Initial app window capture failed:', error.message);
-            resolve(null);
-          } else {
-            console.log(`✓ Initial app window screenshot saved: ${screenshotPath}`);
-            resolve({
-              path: screenshotPath,
-              windowName: appWindow.name,
-              windowId: windowId,
-              timestamp: Date.now(),
-              type: 'initial_app_window'
-            });
-          }
-        });
-      });
-    } else {
-      // Fallback for other platforms
-      const thumbnailBuffer = appWindow.thumbnail.toPNG();
-      await fs.writeFile(screenshotPath, thumbnailBuffer);
-      console.log(`✓ Initial app window screenshot saved: ${screenshotPath}`);
-      return {
-        path: screenshotPath,
-        windowName: appWindow.name,
-        timestamp: Date.now(),
-        type: 'initial_app_window_thumbnail'
-      };
-    }
-  } catch (error) {
-    console.error('Initial app window screenshot failed:', error);
-    return null;
-  }
-}
-
-// Capture final app window screenshot
-async function captureFinalAppWindowScreenshot() {
-  try {
-    const appWindow = await getActiveApplicationWindow();
-    if (!appWindow) return null;
-
-    console.log(`Capturing final app window: ${appWindow.name}`);
-    const screenshotPath = `data/${currentTaskName}/screenshots/final_app_window.png`;
-
-    if (process.platform === 'darwin') {
-      const { exec } = require('child_process');
-      const windowId = appWindow.id.split(':')[1];
-      
-      return new Promise((resolve) => {
-        exec(`/usr/sbin/screencapture -l ${windowId} -x "${screenshotPath}"`, (error) => {
-          if (error) {
-            console.error('Final app window capture failed:', error.message);
-            resolve(null);
-          } else {
-            console.log(`✓ Final app window screenshot saved: ${screenshotPath}`);
-            resolve({
-              path: screenshotPath,
-              windowName: appWindow.name,
-              windowId: windowId,
-              timestamp: Date.now(),
-              type: 'final_app_window'
-            });
-          }
-        });
-      });
-    } else {
-      // Fallback for other platforms
-      const thumbnailBuffer = appWindow.thumbnail.toPNG();
-      await fs.writeFile(screenshotPath, thumbnailBuffer);
-      console.log(`✓ Final app window screenshot saved: ${screenshotPath}`);
-      return {
-        path: screenshotPath,
-        windowName: appWindow.name,
-        timestamp: Date.now(),
-        type: 'final_app_window_thumbnail'
-      };
-    }
-  } catch (error) {
-    console.error('Final app window screenshot failed:', error);
-    return null;
-  }
-}
-
 async function startRecording(taskName) {
   console.log('startRecording called with:', taskName, 'isRecording:', isRecording);
   if (isRecording) {
@@ -1865,7 +1463,7 @@ async function startRecording(taskName) {
 
   console.log('Creating directories for task:', taskName);
   // Create directories
-  await fs.mkdir(`data/${taskName}/screenshots`, { recursive: true });
+  // await fs.mkdir(`data/${taskName}/screenshots`, { recursive: true });
   await fs.mkdir(`data/${taskName}/videos`, { recursive: true });
 
   console.log('Starting overlay tracking for screen following...');
@@ -1899,13 +1497,6 @@ async function startRecording(taskName) {
   console.log('Waiting for overlay to hide before taking initial screenshot...');
   await new Promise(resolve => setTimeout(resolve, 1000)); // 1 second delay
   
-  console.log('Taking initial screenshot at recording start...');
-  // Take initial screenshot with distinct naming
-  const initialScreenshots = await captureInitialScreenshot();
-  if (initialScreenshots) {
-    console.log('✓ Initial screenshots captured with distinct paths');
-  }
-  
   // Audio feedback - system beep
   console.log('\x07'); // Bell character for system beep
   
@@ -1920,13 +1511,6 @@ async function stopRecording() {
   }
   
   console.log('Stopping recording...');
-  
-  console.log('Taking final screenshot before stopping...');
-  // Take final screenshot with distinct naming
-  const finalScreenshots = await captureFinalScreenshot();
-  if (finalScreenshots) {
-    console.log('✓ Final screenshots captured with distinct paths');
-  }
   
   isRecording = false;
   sessionData.endTime = Date.now();
@@ -1980,7 +1564,6 @@ async function stopRecording() {
   // Save session data in non-blocking way
   const sessionPath = `data/${currentTaskName}/session_data.json`;
   console.log(`Session data path: ${sessionPath}`);
-  console.log(`Session data size: ${sessionData.events?.length || 0} events, ${sessionData.screenshots?.length || 0} screenshots`);
   
   // Save session data without blocking the main thread
   setImmediate(async () => {

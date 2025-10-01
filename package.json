@@ -2,7 +2,7 @@
   "name": "data-collector-app",
   "version": "1.0.0",
   "description": "Data collection app for LLM computer agent training",
-  "main": "src/main.js",
+  "main": "src/js/main.js",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",

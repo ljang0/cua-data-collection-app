@@ -1,3 +1,4 @@
+// USED BY video-recorder.html
 const { ipcRenderer } = require('electron');
 
 document.addEventListener('DOMContentLoaded', () => {
